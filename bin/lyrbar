@@ -1,0 +1,116 @@
+#!/usr/bin/env bash
+# lyrbar — control script for the lyrbar menu bar app.
+#   lyrbar on|off|restart|status|logs|build|setup <id>|login|logout|install
+set -euo pipefail
+
+# Resolve the repo root from this script's real location (handles symlinks).
+SOURCE="${BASH_SOURCE[0]}"
+while [ -h "$SOURCE" ]; do
+  DIR="$(cd -P "$(dirname "$SOURCE")" >/dev/null 2>&1 && pwd)"
+  SOURCE="$(readlink "$SOURCE")"
+  [[ $SOURCE != /* ]] && SOURCE="$DIR/$SOURCE"
+done
+BIN_DIR="$(cd -P "$(dirname "$SOURCE")" >/dev/null 2>&1 && pwd)"
+ROOT="$(cd -P "$BIN_DIR/.." >/dev/null 2>&1 && pwd)"
+
+APP="$ROOT/.build/release/lyrbar"
+STATE_DIR="$HOME/.config/lyrbar"
+PID_FILE="$STATE_DIR/lyrbar.pid"
+LOG_FILE="$STATE_DIR/lyrbar.log"
+mkdir -p "$STATE_DIR"
+
+c_green='\033[0;32m'; c_red='\033[0;31m'; c_dim='\033[2m'; c_off='\033[0m'
+
+build() {
+  echo -e "${c_dim}Building lyrbar (release)…${c_off}"
+  ( cd "$ROOT" && swift build -c release )
+}
+
+ensure_built() { [ -x "$APP" ] || build; }
+
+is_running() {
+  [ -f "$PID_FILE" ] || return 1
+  local pid; pid="$(cat "$PID_FILE" 2>/dev/null || true)"
+  [ -n "${pid:-}" ] && kill -0 "$pid" 2>/dev/null
+}
+
+start() {
+  if is_running; then echo "lyrbar is already running (pid $(cat "$PID_FILE"))."; return 0; fi
+  ensure_built
+  nohup "$APP" >"$LOG_FILE" 2>&1 &
+  echo $! > "$PID_FILE"
+  sleep 0.4
+  if is_running; then
+    echo -e "${c_green}lyrbar is on.${c_off} Look for it in the menu bar."
+    if ! "$APP" status-config 2>/dev/null | grep -q "loggedIn: yes"; then
+      echo -e "${c_dim}Not logged in yet — click the menu bar item (or run 'lyrbar login').${c_off}"
+    fi
+  else
+    echo -e "${c_red}lyrbar failed to start.${c_off} See: $LOG_FILE"; exit 1
+  fi
+}
+
+stop() {
+  if is_running; then
+    kill "$(cat "$PID_FILE")" 2>/dev/null || true
+    rm -f "$PID_FILE"
+    echo "lyrbar is off."
+  else
+    # Fallback: clean up any stray instance.
+    pkill -f "$APP" 2>/dev/null || true
+    rm -f "$PID_FILE"
+    echo "lyrbar was not running."
+  fi
+}
+
+case "${1:-}" in
+  on|start)   start ;;
+  off|stop)   stop ;;
+  restart)    stop; sleep 0.3; start ;;
+  status)
+    if is_running; then echo -e "${c_green}running${c_off} (pid $(cat "$PID_FILE"))"; else echo "stopped"; fi
+    ensure_built; "$APP" status-config 2>/dev/null || true ;;
+  logs)       touch "$LOG_FILE"; tail -n 50 -f "$LOG_FILE" ;;
+  build)      build ;;
+  setup)
+    shift; ensure_built; "$APP" setup "${1:-}" ;;
+  login)
+    # Restart into the GUI and force the auth flow.
+    stop >/dev/null 2>&1 || true; ensure_built
+    nohup "$APP" login >"$LOG_FILE" 2>&1 &
+    echo $! > "$PID_FILE"
+    echo "Opening Spotify login in your browser…" ;;
+  logout)     ensure_built; stop >/dev/null 2>&1 || true; "$APP" logout ;;
+  warmup)     ensure_built; "$APP" warmup ;;
+  install)
+    TARGET="${2:-$HOME/.local/bin}"
+    mkdir -p "$TARGET"
+    ln -sf "$BIN_DIR/lyrbar" "$TARGET/lyrbar"
+    echo "Symlinked lyrbar → $TARGET/lyrbar"
+    case ":$PATH:" in *":$TARGET:"*) ;; *) echo "Add to PATH:  export PATH=\"$TARGET:\$PATH\"";; esac ;;
+  ""|help|-h|--help)
+    cat <<EOF
+lyrbar — synced Spotify lyrics in your menu bar
+
+  lyrbar on             build (if needed) and launch in the menu bar
+  lyrbar off            quit the menu bar app
+  lyrbar restart        restart it
+  lyrbar status         show running + login state
+  lyrbar logs           tail the log
+  lyrbar build          rebuild the release binary
+  lyrbar setup <id>     save your Spotify Client ID
+  lyrbar login          (re)run the Spotify browser login
+  lyrbar logout         clear stored Spotify tokens
+  lyrbar warmup         pre-fetch lyrics for your top/liked/recent songs
+  lyrbar install [dir]  symlink this script onto your PATH (default ~/.local/bin)
+
+First run:
+  1) Create a Spotify app at https://developer.spotify.com/dashboard
+     Redirect URI MUST be exactly:  http://127.0.0.1:8888/callback
+     Enable the "Web API".
+  2) lyrbar setup <your_client_id>
+  3) lyrbar on   → click the menu bar item → "Log in to Spotify…"
+EOF
+    ;;
+  *) echo "Unknown command: $1"; echo "Try: lyrbar help"; exit 1 ;;
+esac
