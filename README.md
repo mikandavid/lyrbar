@@ -1,11 +1,10 @@
-# lyrbar
+# Lyrbar
 
 Synced Spotify lyrics, live in your macOS menu bar.
 
 `lyrbar` logs into your Spotify account, watches whatever you're playing (on any
-device — phone, desktop, web), and scrolls the current lyric line right in the
-menu bar. Click it for the full synced lyrics in a popover; click any line to
-seek there.
+device — phone, desktop, web), and shows the current lyric line right in the
+menu bar. Click it to view full lyrics, control playback and device, and change lyrics providers/offset.
 
 ```
 ♪  I said ooh, I'm blinded by the lights
