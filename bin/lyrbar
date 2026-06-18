@@ -26,7 +26,11 @@ build() {
   ( cd "$ROOT" && swift build -c release )
 }
 
-ensure_built() { [ -x "$APP" ] || build; }
+ensure_built() {
+  if [ ! -x "$APP" ] || [ -n "$(find "$ROOT/Sources" "$ROOT/Package.swift" -newer "$APP" -print -quit 2>/dev/null)" ]; then
+    build
+  fi
+}
 
 is_running() {
   [ -f "$PID_FILE" ] || return 1

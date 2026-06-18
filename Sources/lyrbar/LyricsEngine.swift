@@ -44,6 +44,7 @@ final class LyricsEngine {
 
     // Auto-suspend after this long with playback stopped/paused.
     private let idleLimit: TimeInterval = 600   // 10 minutes
+    private let idlePollInterval: TimeInterval = 120
     private var notPlayingSince: TimeInterval?
 
     var current: LyricsResult? {
@@ -73,11 +74,15 @@ final class LyricsEngine {
         upNext = nil
     }
 
-    /// Stop polling after a long idle. Only `resume()` restarts it.
+    /// Back off after a long idle, but keep a slow poll alive so playback can
+    /// wake syncing up automatically.
     private func suspend() {
         invalidateTimers()
         isSuspended = true
         notPlayingSince = nil
+        pollTimer = Timer.scheduledTimer(withTimeInterval: idlePollInterval, repeats: true) { [weak self] _ in
+            Task { await self?.poll() }
+        }
         setStatus("⏸ lyrbar paused — click to resume")
         delegate?.engineDidLoadLyrics()
     }
@@ -125,6 +130,11 @@ final class LyricsEngine {
         // Idle tracking → auto-suspend after `idleLimit` of no active playback.
         let playing = (np?.isPlaying == true)
         if playing {
+            if isSuspended {
+                isSuspended = false
+                scheduleTimers()
+                delegate?.engineDidLoadLyrics()
+            }
             notPlayingSince = nil
         } else {
             let now = ProcessInfo.processInfo.systemUptime
@@ -204,7 +214,7 @@ final class LyricsEngine {
 
     private func prefetchUpcoming(kind: LyricsProviderKind) {
         Task {
-            let upcoming = (try? await client.upcoming(limit: 2)) ?? []
+            let upcoming = (try? await client.upcoming(limit: 3)) ?? []
             updateUpNext(from: upcoming.first)
             for track in upcoming where !store.hasLyrics(track.id) && !inFlightPrefetch.contains(track.id) {
                 inFlightPrefetch.insert(track.id)

@@ -7,10 +7,10 @@ final class SliderItemView: NSView {
     private let format: (Double) -> String
     var onChange: ((Double) -> Void)?
 
-    init(title: String, range: ClosedRange<Double>, value: Double,
+    init(title: String, range: ClosedRange<Double>, value: Double, width: CGFloat = 260,
          format: @escaping (Double) -> String) {
         self.format = format
-        super.init(frame: NSRect(x: 0, y: 0, width: 260, height: 46))
+        super.init(frame: NSRect(x: 0, y: 0, width: width, height: 46))
 
         titleLabel.font = .systemFont(ofSize: 12, weight: .medium)
         titleLabel.textColor = .secondaryLabelColor

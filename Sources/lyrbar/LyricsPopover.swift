@@ -16,6 +16,9 @@ private final class LyricRowView: NSView {
         label.alignment = .center
         label.lineBreakMode = .byWordWrapping
         label.maximumNumberOfLines = 0
+        label.preferredMaxLayoutWidth = 380
+        label.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        label.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         addSubview(label)
         NSLayoutConstraint.activate([
             label.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 20),
@@ -27,8 +30,8 @@ private final class LyricRowView: NSView {
     required init?(coder: NSCoder) { fatalError() }
 
     func setActive(_ active: Bool) {
-        label.textColor = active ? .controlAccentColor : .secondaryLabelColor
-        label.font = active ? .systemFont(ofSize: 15, weight: .semibold) : .systemFont(ofSize: 13)
+        label.textColor = active ? .labelColor : .secondaryLabelColor
+        label.font = active ? .boldSystemFont(ofSize: 15) : .systemFont(ofSize: 13)
     }
 
     override func mouseDown(with event: NSEvent) { onClick?(timeMs) }
@@ -51,7 +54,7 @@ private final class ProgressBarView: NSView {
         super.init(frame: frameRect)
         wantsLayer = true
         track.backgroundColor = NSColor.tertiaryLabelColor.withAlphaComponent(0.4).cgColor
-        fill.backgroundColor = NSColor.controlAccentColor.cgColor
+        fill.backgroundColor = AppAccentColor.current.cgColor
         layer?.addSublayer(track)
         layer?.addSublayer(fill)
     }
@@ -84,6 +87,8 @@ private final class ProgressBarView: NSView {
 
 @MainActor
 final class LyricsPopoverController: NSViewController {
+    static let contentSize = NSSize(width: 420, height: 520)
+
     private weak var engine: LyricsEngine?
     var onSeek: ((Int) -> Void)?           // absolute playback position (ms)
     var onNextMatch: (() -> Void)?
@@ -96,6 +101,7 @@ final class LyricsPopoverController: NSViewController {
     var onPlayPause: (() -> Void)?
     var onNext: (() -> Void)?
     var onShowDevices: ((NSView) -> Void)?   // anchor view for the device picker
+    var onShowSettings: ((NSView) -> Void)?
     var onQuit: (() -> Void)?
 
     // Header
@@ -129,6 +135,7 @@ final class LyricsPopoverController: NSViewController {
     private let nextButton = NSButton()
     private let trashButton = NSButton()
     private let deviceButton = NSButton()
+    private let settingsButton = NSButton()
     private let quitButton = NSButton()
     private let resumeButton = NSButton(title: "▶︎ Resume syncing", target: nil, action: nil)
     private let providerPopup = NSPopUpButton(frame: .zero, pullsDown: false)
@@ -151,7 +158,8 @@ final class LyricsPopoverController: NSViewController {
     // MARK: Layout
 
     override func loadView() {
-        let root = NSView(frame: NSRect(x: 0, y: 0, width: 360, height: 520))
+        preferredContentSize = Self.contentSize
+        let root = NSView(frame: NSRect(origin: .zero, size: Self.contentSize))
 
         // ---- Header: artwork + title/artist/source ----
         artwork.translatesAutoresizingMaskIntoConstraints = false
@@ -166,14 +174,17 @@ final class LyricsPopoverController: NSViewController {
         titleLabel.font = .systemFont(ofSize: 15, weight: .bold)
         titleLabel.lineBreakMode = .byTruncatingTail
         titleLabel.translatesAutoresizingMaskIntoConstraints = false
+        titleLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         artistLabel.font = .systemFont(ofSize: 12)
         artistLabel.textColor = .secondaryLabelColor
         artistLabel.lineBreakMode = .byTruncatingTail
         artistLabel.translatesAutoresizingMaskIntoConstraints = false
+        artistLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         sourceLabel.font = .systemFont(ofSize: 10)
         sourceLabel.textColor = .tertiaryLabelColor
         sourceLabel.lineBreakMode = .byTruncatingTail
         sourceLabel.translatesAutoresizingMaskIntoConstraints = false
+        sourceLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
 
         let titleStack = NSStackView(views: [titleLabel, artistLabel, sourceLabel])
         titleStack.orientation = .vertical
@@ -341,6 +352,9 @@ final class LyricsPopoverController: NSViewController {
         configureIconButton(deviceButton, symbol: "airplayaudio",
                             action: #selector(deviceTapped),
                             tip: "Switch playback device")
+        configureIconButton(settingsButton, symbol: "gearshape",
+                            action: #selector(settingsTapped),
+                            tip: "Settings")
         configureIconButton(quitButton, symbol: "power",
                             action: #selector(quitTapped),
                             tip: "Quit lyrbar")
@@ -357,7 +371,7 @@ final class LyricsPopoverController: NSViewController {
         spacer.translatesAutoresizingMaskIntoConstraints = false
         spacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
 
-        let row = NSStackView(views: [nextButton, trashButton, deviceButton, spacer, providerPopup, quitButton])
+        let row = NSStackView(views: [nextButton, trashButton, deviceButton, spacer, settingsButton, quitButton])
         row.orientation = .horizontal
         row.spacing = 10
         row.alignment = .centerY
@@ -368,16 +382,14 @@ final class LyricsPopoverController: NSViewController {
                                      value: Settings.shared.width,
                                      format: { "\(Int($0)) px" })
         widthSlider.onChange = { [weak self] v in self?.onWidthChange?(v) }
-        container.addArrangedSubview(widthSlider)
 
         offsetSlider = SliderItemView(title: "Lyric offset (this song)",
                                       range: Settings.offsetRange,
                                       value: Double(engine?.currentOffsetMs ?? 0),
                                       format: { String(format: "%+d ms", Int($0)) })
         offsetSlider.onChange = { [weak self] v in self?.onOffsetChange?(Int(v)) }
-        container.addArrangedSubview(offsetSlider)
 
-        for v in [upNextRow as NSView, row as NSView, widthSlider as NSView, offsetSlider as NSView] {
+        for v in [upNextRow as NSView, row as NSView] {
             v.widthAnchor.constraint(equalTo: container.widthAnchor, constant: -28).isActive = true
         }
         return container
@@ -460,6 +472,25 @@ final class LyricsPopoverController: NSViewController {
         return String(format: "%d:%02d", s / 60, s % 60)
     }
 
+    private static func truncate(_ text: String, toWidth width: CGFloat, font: NSFont) -> String {
+        let attributes: [NSAttributedString.Key: Any] = [.font: font]
+        guard (text as NSString).size(withAttributes: attributes).width > width else { return text }
+        var low = 0
+        var high = text.count
+        var best = "..."
+        while low <= high {
+            let mid = (low + high) / 2
+            let candidate = String(text.prefix(mid)) + "..."
+            if (candidate as NSString).size(withAttributes: attributes).width <= width {
+                best = candidate
+                low = mid + 1
+            } else {
+                high = mid - 1
+            }
+        }
+        return best
+    }
+
     // MARK: Reload
 
     /// Rebuild the line list from the engine's current candidate.
@@ -493,7 +524,8 @@ final class LyricsPopoverController: NSViewController {
         resumeButton.isHidden = true
 
         if let np = engine.nowPlaying {
-            titleLabel.stringValue = np.title
+            titleLabel.stringValue = Self.truncate(np.title, toWidth: 328, font: titleLabel.font ?? .systemFont(ofSize: 15, weight: .bold))
+            titleLabel.toolTip = np.title
             artistLabel.stringValue = np.artist
             sourceLabel.stringValue = engine.current.map { c in
                 c.synced ? "\(c.source) · synced" : "\(c.source) · text only"
@@ -501,6 +533,7 @@ final class LyricsPopoverController: NSViewController {
             loadArtwork(np.artworkURL)
         } else {
             titleLabel.stringValue = "Nothing playing"
+            titleLabel.toolTip = nil
             artistLabel.stringValue = ""
             sourceLabel.stringValue = ""
             artwork.image = Self.placeholder
@@ -590,6 +623,7 @@ final class LyricsPopoverController: NSViewController {
     @objc private func prevTapped() { onPrevious?() }
     @objc private func playPauseTapped() { onPlayPause?() }
     @objc private func nextTrackTapped() { onNext?() }
+    @objc private func settingsTapped() { onShowSettings?(settingsButton) }
 
     @objc private func providerChanged() {
         let idx = providerPopup.indexOfSelectedItem

@@ -2,6 +2,11 @@ import AppKit
 
 @MainActor
 final class StatusController: NSObject, LyricsEngineDelegate, NSPopoverDelegate {
+    private enum MenuLayout {
+        static let width: CGFloat = 300
+        static let titleWidth: CGFloat = 250
+    }
+
     private let statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
     private let auth = SpotifyAuth()
     private lazy var client = SpotifyClient(auth: auth)
@@ -12,6 +17,7 @@ final class StatusController: NSObject, LyricsEngineDelegate, NSPopoverDelegate 
 
     private var statusText = "♪ lyrbar"
     private var clickMonitor: Any?
+    private var widthRenderTimer: Timer?
     private var isImporting = false
 
     // MARK: Start
@@ -36,7 +42,7 @@ final class StatusController: NSObject, LyricsEngineDelegate, NSPopoverDelegate 
         }
         popoverVC.onWidthChange = { [weak self] v in
             Settings.shared.width = v
-            self?.render(self?.statusText ?? "")
+            self?.scheduleWidthRender()
         }
         popoverVC.onTrash = { [weak self] in self?.engine.trashCurrent() }
         popoverVC.onResume = { [weak self] in self?.engine.resume() }
@@ -56,6 +62,7 @@ final class StatusController: NSObject, LyricsEngineDelegate, NSPopoverDelegate 
             }
         }
         popoverVC.onShowDevices = { [weak self] anchor in self?.showDeviceMenu(from: anchor) }
+        popoverVC.onShowSettings = { [weak self] anchor in self?.showSettingsMenu(from: anchor) }
         popoverVC.onQuit = { NSApp.terminate(nil) }
         refreshAccountState()
     }
@@ -91,12 +98,13 @@ final class StatusController: NSObject, LyricsEngineDelegate, NSPopoverDelegate 
         Task {
             let devices = await client.devices()
             let menu = NSMenu()
+            menu.minimumWidth = MenuLayout.width
             if devices.isEmpty {
                 let mi = NSMenuItem(title: "No devices available", action: nil, keyEquivalent: "")
                 mi.isEnabled = false
                 menu.addItem(mi)
                 menu.addItem(.separator())
-                let hint = NSMenuItem(title: "Open Spotify on a device to see it here",
+                let hint = NSMenuItem(title: fixedMenuTitle("Open Spotify on a device to see it here"),
                                       action: nil, keyEquivalent: "")
                 hint.isEnabled = false
                 menu.addItem(hint)
@@ -105,7 +113,7 @@ final class StatusController: NSObject, LyricsEngineDelegate, NSPopoverDelegate 
                 header.isEnabled = false
                 menu.addItem(header)
                 for d in devices {
-                    let mi = NSMenuItem(title: d.name, action: #selector(self.devicePicked(_:)), keyEquivalent: "")
+                    let mi = NSMenuItem(title: self.fixedMenuTitle(d.name), action: #selector(self.devicePicked(_:)), keyEquivalent: "")
                     mi.target = self
                     mi.representedObject = d.id
                     mi.state = d.isActive ? .on : .off
@@ -124,6 +132,12 @@ final class StatusController: NSObject, LyricsEngineDelegate, NSPopoverDelegate 
     @objc private func devicePicked(_ sender: NSMenuItem) {
         guard let id = sender.representedObject as? String else { return }
         Task { await client.transferPlayback(to: id); try? await Task.sleep(nanoseconds: 400_000_000); engine.nudge() }
+    }
+
+    private func showSettingsMenu(from anchor: NSView) {
+        let menu = buildMenu()
+        let origin = NSPoint(x: 0, y: anchor.bounds.height + 4)
+        menu.popUp(positioning: nil, at: origin, in: anchor)
     }
 
     // MARK: Rendering
@@ -161,6 +175,17 @@ final class StatusController: NSObject, LyricsEngineDelegate, NSPopoverDelegate 
         if statusItem.length != width { statusItem.length = width }
     }
 
+    private func scheduleWidthRender() {
+        widthRenderTimer?.invalidate()
+        widthRenderTimer = Timer.scheduledTimer(withTimeInterval: 0.35, repeats: false) { [weak self] _ in
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                self.widthRenderTimer = nil
+                self.render(self.statusText)
+            }
+        }
+    }
+
     private static func truncate(_ s: String, toWidth width: Double, font: NSFont) -> String {
         let attrs: [NSAttributedString.Key: Any] = [.font: font]
         if (s as NSString).size(withAttributes: attrs).width <= width { return s }
@@ -196,7 +221,10 @@ final class StatusController: NSObject, LyricsEngineDelegate, NSPopoverDelegate 
             closePopover()
         } else {
             // show() loads the content view; populate afterwards.
+            popover.contentSize = LyricsPopoverController.contentSize
+            popoverVC.preferredContentSize = LyricsPopoverController.contentSize
             popover.show(relativeTo: button.bounds, of: button, preferredEdge: .maxY)
+            popover.contentSize = LyricsPopoverController.contentSize
             popoverVC.reload()
             popoverVC.highlight(engine.currentLineIndex)
             NSApp.activate(ignoringOtherApps: true)
@@ -235,11 +263,12 @@ final class StatusController: NSObject, LyricsEngineDelegate, NSPopoverDelegate 
 
     private func buildMenu() -> NSMenu {
         let menu = NSMenu()
+        menu.minimumWidth = MenuLayout.width
         let hasClient = Settings.shared.clientId?.isEmpty == false
         let loggedIn = auth.isLoggedIn
 
         if let np = engine.nowPlaying {
-            let header = NSMenuItem(title: "\(np.title) — \(np.artist)", action: nil, keyEquivalent: "")
+            let header = NSMenuItem(title: fixedMenuTitle("\(np.title) — \(np.artist)"), action: nil, keyEquivalent: "")
             header.isEnabled = false
             menu.addItem(header)
         }
@@ -261,6 +290,7 @@ final class StatusController: NSObject, LyricsEngineDelegate, NSPopoverDelegate 
             let offset = SliderItemView(title: "Lyric offset (this song)",
                                         range: Settings.offsetRange,
                                         value: Double(engine.currentOffsetMs),
+                                        width: MenuLayout.width,
                                         format: { String(format: "%+d ms", Int($0)) })
             offset.onChange = { [weak self] in self?.engine.setOffset(Int($0)) }
             offset.isEnabled = engine.nowPlaying != nil
@@ -272,18 +302,20 @@ final class StatusController: NSObject, LyricsEngineDelegate, NSPopoverDelegate 
             let widthSlider = SliderItemView(title: "Menu bar width",
                                              range: Settings.widthRange,
                                              value: Settings.shared.width,
+                                             width: MenuLayout.width,
                                              format: { "\(Int($0)) px" })
             widthSlider.onChange = { [weak self] v in
                 Settings.shared.width = v
-                self?.render(self?.statusText ?? "")
+                self?.scheduleWidthRender()
             }
             menu.addItem(viewItem(widthSlider))
 
             // Provider submenu
-            let providerItem = NSMenuItem(title: "Lyrics provider", action: nil, keyEquivalent: "")
+            let providerItem = NSMenuItem(title: fixedMenuTitle("Lyrics provider"), action: nil, keyEquivalent: "")
             let sub = NSMenu()
+            sub.minimumWidth = MenuLayout.width
             for kind in LyricsProviderKind.allCases {
-                let mi = NSMenuItem(title: kind.display, action: #selector(menuSetProvider(_:)), keyEquivalent: "")
+                let mi = NSMenuItem(title: fixedMenuTitle(kind.display), action: #selector(menuSetProvider(_:)), keyEquivalent: "")
                 mi.target = self
                 mi.representedObject = kind.rawValue
                 mi.state = (Settings.shared.provider == kind) ? .on : .off
@@ -317,10 +349,35 @@ final class StatusController: NSObject, LyricsEngineDelegate, NSPopoverDelegate 
     }
 
     private func item(_ title: String, _ action: Selector?, enabled: Bool = true) -> NSMenuItem {
-        let mi = NSMenuItem(title: title, action: action, keyEquivalent: "")
+        let mi = NSMenuItem(title: fixedMenuTitle(title), action: action, keyEquivalent: "")
         mi.target = self
         mi.isEnabled = enabled && action != nil
         return mi
+    }
+
+    private func fixedMenuTitle(_ title: String) -> String {
+        let font = NSFont.menuFont(ofSize: 0)
+        let attributes: [NSAttributedString.Key: Any] = [.font: font]
+        guard (title as NSString).size(withAttributes: attributes).width > MenuLayout.titleWidth else {
+            return title
+        }
+
+        let ellipsis = "…"
+        var low = 0
+        var high = title.count
+        var best = ellipsis
+        while low <= high {
+            let mid = (low + high) / 2
+            let prefix = String(title.prefix(mid)) + ellipsis
+            let width = (prefix as NSString).size(withAttributes: attributes).width
+            if width <= MenuLayout.titleWidth {
+                best = prefix
+                low = mid + 1
+            } else {
+                high = mid - 1
+            }
+        }
+        return best
     }
 
     private func viewItem(_ view: NSView) -> NSMenuItem {
