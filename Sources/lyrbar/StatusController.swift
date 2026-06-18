@@ -56,6 +56,7 @@ final class StatusController: NSObject, LyricsEngineDelegate, NSPopoverDelegate 
             }
         }
         popoverVC.onShowDevices = { [weak self] anchor in self?.showDeviceMenu(from: anchor) }
+        popoverVC.onQuit = { NSApp.terminate(nil) }
         refreshAccountState()
     }
 
@@ -132,11 +133,27 @@ final class StatusController: NSObject, LyricsEngineDelegate, NSPopoverDelegate 
         guard let button = statusItem.button else { return }
         let font = NSFont.systemFont(ofSize: 13)
         button.font = font
+        button.imagePosition = .noImage
+
+        // Nothing actually playing (idle / setup / login / connecting) → collapse
+        // to just the note glyph, sized to its content, so the item doesn't hog
+        // the menu bar while there are no lyrics to show. The full message stays
+        // available as a tooltip.
+        if engine.nowPlaying == nil {
+            button.alignment = .center
+            button.title = "♪"
+            button.toolTip = text
+            if statusItem.length != NSStatusItem.variableLength {
+                statusItem.length = NSStatusItem.variableLength
+            }
+            return
+        }
+
         // Left-align the lyric within the item and truncate to fit, so text
         // hugs the left edge and never draws past the item's bounds (which is
         // what made it appear to overlap the neighbouring menu bar item).
         button.alignment = .left
-        button.imagePosition = .noImage
+        button.toolTip = nil
         // Fixed width set by the slider; only mutate when it actually changes
         // to avoid menu-bar layout thrash.
         let width = Settings.shared.width

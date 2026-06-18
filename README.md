@@ -79,7 +79,7 @@ lyrbar install [dir]  symlink onto your PATH (default ~/.local/bin)
 
 ## 🎯 Using it
 
-- **Left-click** the menu bar item → full-lyrics popover: album art + transport controls at the top, lyrics below, an *Up next* line, and the next-match / trash / device / provider / width / offset controls in the footer. Click a lyric line (or scrub the progress bar) to seek. Transport (play/pause/skip) and device switching need Spotify Premium.
+- **Left-click** the menu bar item → full-lyrics popover: album art + transport controls at the top, lyrics below, an *Up next* line, and the next-match / trash / device / provider / width / offset / quit controls in the footer. Click a lyric line (or scrub the progress bar) to seek. Transport (play/pause/skip) and device switching need Spotify Premium.
 - **Right-click** (or ⌃-click) → menu: per-song offset slider, width slider, provider picker, *Try next match*, *Reload lyrics*, login/logout, quit.
 
 ---
@@ -108,5 +108,5 @@ lyrbar install [dir]  symlink onto your PATH (default ~/.local/bin)
 
 ## ⚠️ Notes / limits
 
-- "Fill the whole menu bar" isn't supported by macOS (`NSStatusItem` shares the bar and there's no API to claim all free space), so lyrbar uses a fixed width set by the **Menu bar width** slider (in the popover). The item always occupies exactly that width and truncates long lines.
+- "Fill the whole menu bar" isn't supported by macOS (`NSStatusItem` shares the bar and there's no API to claim all free space), so lyrbar uses a fixed width set by the **Menu bar width** slider (in the popover) while a track is playing, and collapses to just the ♪ glyph when nothing is playing. The item truncates long lines.
 - If lyrics look wrong, use **Try next match** or switch the provider; you can also fine-tune timing with the offset slider.

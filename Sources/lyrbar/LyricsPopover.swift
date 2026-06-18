@@ -96,6 +96,7 @@ final class LyricsPopoverController: NSViewController {
     var onPlayPause: (() -> Void)?
     var onNext: (() -> Void)?
     var onShowDevices: ((NSView) -> Void)?   // anchor view for the device picker
+    var onQuit: (() -> Void)?
 
     // Header
     private let artwork = NSImageView()
@@ -128,6 +129,7 @@ final class LyricsPopoverController: NSViewController {
     private let nextButton = NSButton()
     private let trashButton = NSButton()
     private let deviceButton = NSButton()
+    private let quitButton = NSButton()
     private let resumeButton = NSButton(title: "▶︎ Resume syncing", target: nil, action: nil)
     private let providerPopup = NSPopUpButton(frame: .zero, pullsDown: false)
     private var widthSlider: SliderItemView!
@@ -339,6 +341,9 @@ final class LyricsPopoverController: NSViewController {
         configureIconButton(deviceButton, symbol: "airplayaudio",
                             action: #selector(deviceTapped),
                             tip: "Switch playback device")
+        configureIconButton(quitButton, symbol: "power",
+                            action: #selector(quitTapped),
+                            tip: "Quit lyrbar")
 
         providerPopup.controlSize = .small
         providerPopup.font = .systemFont(ofSize: 11)
@@ -352,7 +357,7 @@ final class LyricsPopoverController: NSViewController {
         spacer.translatesAutoresizingMaskIntoConstraints = false
         spacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
 
-        let row = NSStackView(views: [nextButton, trashButton, deviceButton, spacer, providerPopup])
+        let row = NSStackView(views: [nextButton, trashButton, deviceButton, spacer, providerPopup, quitButton])
         row.orientation = .horizontal
         row.spacing = 10
         row.alignment = .centerY
@@ -580,6 +585,7 @@ final class LyricsPopoverController: NSViewController {
     @objc private func nextTapped() { onNextMatch?() }
     @objc private func trashTapped() { onTrash?() }
     @objc private func deviceTapped() { onShowDevices?(deviceButton) }
+    @objc private func quitTapped() { onQuit?() }
     @objc private func resumeTapped() { onResume?() }
     @objc private func prevTapped() { onPrevious?() }
     @objc private func playPauseTapped() { onPlayPause?() }
