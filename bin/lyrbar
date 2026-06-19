@@ -32,6 +32,10 @@ ensure_built() {
   fi
 }
 
+latest_crash_report() {
+  find "$HOME/Library/Logs/DiagnosticReports" -maxdepth 1 -name 'lyrbar-*.ips' -print 2>/dev/null | sort | tail -1
+}
+
 is_running() {
   [ -f "$PID_FILE" ] || return 1
   local pid; pid="$(cat "$PID_FILE" 2>/dev/null || true)"
@@ -74,7 +78,14 @@ case "${1:-}" in
   status)
     if is_running; then echo -e "${c_green}running${c_off} (pid $(cat "$PID_FILE"))"; else echo "stopped"; fi
     ensure_built; "$APP" status-config 2>/dev/null || true ;;
-  logs)       touch "$LOG_FILE"; tail -n 50 -f "$LOG_FILE" ;;
+  logs)
+    touch "$LOG_FILE"
+    CRASH_REPORT="$(latest_crash_report || true)"
+    echo "App log: $LOG_FILE"
+    if [ -n "${CRASH_REPORT:-}" ]; then
+      echo "Latest crash report: $CRASH_REPORT"
+    fi
+    tail -n 50 -f "$LOG_FILE" ;;
   build)      build ;;
   setup)
     shift; ensure_built; "$APP" setup "${1:-}" ;;

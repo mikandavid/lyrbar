@@ -69,6 +69,9 @@ if runCLI(argv) { /* exits inside */ }
 // `lyrbar login` (or default) launches the GUI; `login` forces the auth flow.
 let autoLogin = (argv.first == "login")
 
+ProcessInfo.processInfo.disableAutomaticTermination("lyrbar menu bar app")
+ProcessInfo.processInfo.disableSuddenTermination()
+
 let app = NSApplication.shared
 let delegate = AppDelegate(autoLogin: autoLogin)
 app.delegate = delegate

@@ -3,8 +3,8 @@ import AppKit
 @MainActor
 final class StatusController: NSObject, LyricsEngineDelegate, NSPopoverDelegate {
     private enum MenuLayout {
-        static let width: CGFloat = 300
-        static let titleWidth: CGFloat = 250
+        static let width: CGFloat = 320
+        static let titleWidth: CGFloat = 266
     }
 
     private let statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
@@ -15,10 +15,48 @@ final class StatusController: NSObject, LyricsEngineDelegate, NSPopoverDelegate 
     private let popover = NSPopover()
     private lazy var popoverVC = LyricsPopoverController(engine: engine)
 
+    private let statusClipView = PassthroughClipView()
+    private let statusLabel = NSTextField(labelWithString: "")
     private var statusText = "♪ lyrbar"
     private var clickMonitor: Any?
     private var widthRenderTimer: Timer?
+    private var scrollTimer: Timer?
+    private var scrollState: ScrollState?
     private var isImporting = false
+    private let scrollFrameInterval: TimeInterval = 1.0 / 20.0
+
+    private struct ScrollState {
+        var text: String
+        var font: NSFont
+        var visibleWidth: CGFloat
+        var textWidth: CGFloat
+        var overflowWidth: CGFloat
+        var startMs: Int
+        var endMs: Int
+        var delayMs: Int
+        var arriveEarlyMs: Int
+    }
+
+    private final class MenuSectionHeaderView: NSView {
+        init(_ title: String) {
+            super.init(frame: NSRect(x: 0, y: 0, width: MenuLayout.width, height: 24))
+            let label = NSTextField(labelWithString: title.uppercased())
+            label.font = .systemFont(ofSize: 10, weight: .semibold)
+            label.textColor = .tertiaryLabelColor
+            label.translatesAutoresizingMaskIntoConstraints = false
+            addSubview(label)
+            NSLayoutConstraint.activate([
+                label.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 16),
+                label.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -16),
+                label.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -4),
+            ])
+        }
+        required init?(coder: NSCoder) { fatalError() }
+    }
+
+    private final class PassthroughClipView: NSView {
+        override func hitTest(_ point: NSPoint) -> NSView? { nil }
+    }
 
     // MARK: Start
 
@@ -154,6 +192,8 @@ final class StatusController: NSObject, LyricsEngineDelegate, NSPopoverDelegate 
         // the menu bar while there are no lyrics to show. The full message stays
         // available as a tooltip.
         if engine.nowPlaying == nil {
+            stopScrolling()
+            removeStatusLabel()
             button.alignment = .center
             button.title = "♪"
             button.toolTip = text
@@ -163,16 +203,148 @@ final class StatusController: NSObject, LyricsEngineDelegate, NSPopoverDelegate 
             return
         }
 
-        // Left-align the lyric within the item and truncate to fit, so text
-        // hugs the left edge and never draws past the item's bounds (which is
-        // what made it appear to overlap the neighbouring menu bar item).
-        button.alignment = .left
-        button.toolTip = nil
+        // Draw through our own clipped label so overflow never bleeds into
+        // neighbouring menu bar items.
+        button.alignment = .center
         // Fixed width set by the slider; only mutate when it actually changes
         // to avoid menu-bar layout thrash.
         let width = Settings.shared.width
-        button.title = Self.truncate(text, toWidth: width - 14, font: font)
         if statusItem.length != width { statusItem.length = width }
+        let visibleWidth = CGFloat(width - 14)
+        installStatusLabel(in: button, visibleWidth: visibleWidth, font: font)
+        let textWidth = Self.measuredWidth(text, font: font)
+        if shouldScroll(text, visibleWidth: visibleWidth, font: font, measuredWidth: textWidth) {
+            startScrolling(text, visibleWidth: visibleWidth, font: font)
+        } else {
+            stopScrolling()
+            let fits = textWidth <= visibleWidth
+            setStatusLabel(text,
+                           visibleWidth: visibleWidth,
+                           labelWidth: visibleWidth,
+                           x: 0,
+                           font: font,
+                           alignment: fits ? .center : .left)
+        }
+        button.toolTip = text
+    }
+
+    private func installStatusLabel(in button: NSStatusBarButton, visibleWidth: CGFloat, font: NSFont) {
+        button.title = ""
+        button.image = nil
+
+        if statusClipView.superview !== button {
+            statusClipView.removeFromSuperview()
+            statusClipView.wantsLayer = true
+            statusClipView.layer?.masksToBounds = true
+            button.addSubview(statusClipView)
+
+            statusLabel.isBordered = false
+            statusLabel.isEditable = false
+            statusLabel.isSelectable = false
+            statusLabel.drawsBackground = false
+            statusLabel.maximumNumberOfLines = 1
+            statusLabel.textColor = .labelColor
+            statusClipView.addSubview(statusLabel)
+        }
+
+        let height = max(button.bounds.height, 22)
+        statusClipView.frame = NSRect(x: 7, y: 0, width: visibleWidth, height: height)
+        statusLabel.font = font
+    }
+
+    private func removeStatusLabel() {
+        statusClipView.removeFromSuperview()
+    }
+
+    private func setStatusLabel(_ text: String,
+                                visibleWidth: CGFloat,
+                                labelWidth: CGFloat,
+                                x: CGFloat,
+                                font: NSFont,
+                                alignment: NSTextAlignment) {
+        let height = max(statusClipView.bounds.height, 22)
+        statusLabel.font = font
+        statusLabel.stringValue = text
+        statusLabel.alignment = alignment
+        statusLabel.lineBreakMode = labelWidth <= visibleWidth ? .byTruncatingTail : .byClipping
+        statusLabel.cell?.lineBreakMode = statusLabel.lineBreakMode
+
+        let labelHeight = ceil(statusLabel.intrinsicContentSize.height)
+        statusLabel.frame = NSRect(
+            x: x,
+            y: floor((height - labelHeight) / 2),
+            width: max(visibleWidth, labelWidth),
+            height: labelHeight
+        )
+    }
+
+    private func shouldScroll(_ text: String, visibleWidth: CGFloat, font: NSFont, measuredWidth: CGFloat) -> Bool {
+        guard Settings.shared.scrollLongLines else { return false }
+        guard
+            let idx = engine.currentLineIndex,
+            engine.lines.indices.contains(idx),
+            text == (engine.lines[idx].text.isEmpty ? "♪" : engine.lines[idx].text),
+            measuredWidth > visibleWidth
+        else { return false }
+        return engine.currentLineDisplayWindow() != nil
+    }
+
+    private func startScrolling(_ text: String, visibleWidth: CGFloat, font: NSFont) {
+        guard statusItem.button != nil, let window = engine.currentLineDisplayWindow() else { return }
+        let textWidth = Self.measuredWidth(text, font: font)
+        let lineDurationMs = max(1, window.endMs - window.startMs)
+        let delayMs = min(750, max(200, Int(Double(lineDurationMs) * 0.18)))
+        let arriveEarlyMs = min(450, max(150, Int(Double(lineDurationMs) * 0.12)))
+        let trailingPad: CGFloat = 12
+
+        scrollState = ScrollState(
+            text: text,
+            font: font,
+            visibleWidth: visibleWidth,
+            textWidth: textWidth + trailingPad,
+            overflowWidth: textWidth - visibleWidth + trailingPad,
+            startMs: window.startMs,
+            endMs: window.endMs,
+            delayMs: delayMs,
+            arriveEarlyMs: arriveEarlyMs
+        )
+        setStatusLabel(text,
+                       visibleWidth: visibleWidth,
+                       labelWidth: textWidth + trailingPad,
+                       x: 0,
+                       font: font,
+                       alignment: .left)
+        scrollTimer?.invalidate()
+        scrollTimer = Timer.scheduledTimer(withTimeInterval: scrollFrameInterval, repeats: true) { [weak self] _ in
+            MainActor.assumeIsolated { self?.renderScrollFrame() }
+        }
+    }
+
+    private func stopScrolling() {
+        scrollTimer?.invalidate()
+        scrollTimer = nil
+        scrollState = nil
+    }
+
+    private func renderScrollFrame() {
+        guard let state = scrollState else { return }
+        let pos = engine.position()
+        let scrollStartMs = state.startMs + state.delayMs
+        let scrollEndMs = max(scrollStartMs + 1, state.endMs - state.arriveEarlyMs)
+        let progress: Double
+        if pos <= scrollStartMs {
+            progress = 0
+        } else {
+            progress = min(1, Double(pos - scrollStartMs) / Double(scrollEndMs - scrollStartMs))
+        }
+        let offset = state.overflowWidth * CGFloat(progress)
+        var frame = statusLabel.frame
+        frame.origin.x = -offset
+        statusLabel.frame = frame
+        if progress >= 1 {
+            scrollTimer?.invalidate()
+            scrollTimer = nil
+        }
     }
 
     private func scheduleWidthRender() {
@@ -186,17 +358,9 @@ final class StatusController: NSObject, LyricsEngineDelegate, NSPopoverDelegate 
         }
     }
 
-    private static func truncate(_ s: String, toWidth width: Double, font: NSFont) -> String {
+    private static func measuredWidth(_ s: String, font: NSFont) -> CGFloat {
         let attrs: [NSAttributedString.Key: Any] = [.font: font]
-        if (s as NSString).size(withAttributes: attrs).width <= width { return s }
-        var lo = 0, hi = s.count
-        let chars = Array(s)
-        while lo < hi {
-            let mid = (lo + hi + 1) / 2
-            let candidate = String(chars.prefix(mid)) + "…"
-            if (candidate as NSString).size(withAttributes: attrs).width <= width { lo = mid } else { hi = mid - 1 }
-        }
-        return String(chars.prefix(lo)) + "…"
+        return (s as NSString).size(withAttributes: attrs).width
     }
 
     // MARK: Click handling
@@ -274,31 +438,46 @@ final class StatusController: NSObject, LyricsEngineDelegate, NSPopoverDelegate 
         }
 
         if hasClient && loggedIn {
+            menu.addItem(section("Playback"))
             if engine.isSuspended {
-                menu.addItem(item("▶︎ Resume syncing", #selector(menuResume)))
-                menu.addItem(.separator())
+                menu.addItem(item("Resume syncing", #selector(menuResume), symbol: "play.fill"))
             }
-            menu.addItem(item("Show full lyrics", #selector(menuShowLyrics)))
+            menu.addItem(item("Show full lyrics", #selector(menuShowLyrics), symbol: "text.alignleft"))
             menu.addItem(item("Try next match", #selector(menuNextMatch),
-                              enabled: engine.candidates.count > 1))
+                              enabled: engine.candidates.count > 1,
+                              symbol: "arrow.triangle.2.circlepath"))
             menu.addItem(item("Trash these lyrics (wrong match)", #selector(menuTrash),
-                              enabled: engine.current != nil))
-            menu.addItem(item("Reload lyrics", #selector(menuReload)))
+                              enabled: engine.current != nil,
+                              symbol: "trash"))
+            menu.addItem(item("Reload lyrics", #selector(menuReload), symbol: "arrow.clockwise"))
             menu.addItem(.separator())
 
-            // Offset slider (per current song)
-            let offset = SliderItemView(title: "Lyric offset (this song)",
-                                        range: Settings.offsetRange,
-                                        value: Double(engine.currentOffsetMs),
-                                        width: MenuLayout.width,
-                                        format: { String(format: "%+d ms", Int($0)) })
-            offset.onChange = { [weak self] in self?.engine.setOffset(Int($0)) }
-            offset.isEnabled = engine.nowPlaying != nil
-            menu.addItem(viewItem(offset))
-            menu.addItem(item("Reset offset", #selector(menuResetOffset),
-                              enabled: engine.nowPlaying != nil))
+            menu.addItem(section("Timing"))
+            let globalOffset = SliderItemView(title: "Global lyric offset",
+                                              range: Settings.offsetRange,
+                                              value: Double(Settings.shared.globalOffsetMs),
+                                              width: MenuLayout.width,
+                                              format: { String(format: "%+d ms", Int($0)) })
+            globalOffset.onChange = { [weak self] in self?.engine.setGlobalOffset(Int($0)) }
+            menu.addItem(viewItem(globalOffset))
 
-            // Width slider
+            let songOffset = SliderItemView(title: "This song offset",
+                                            range: Settings.offsetRange,
+                                            value: Double(engine.currentOffsetMs),
+                                            width: MenuLayout.width,
+                                            format: { String(format: "%+d ms", Int($0)) })
+            songOffset.onChange = { [weak self] in self?.engine.setOffset(Int($0)) }
+            songOffset.isEnabled = engine.nowPlaying != nil
+            menu.addItem(viewItem(songOffset))
+            menu.addItem(item("Reset this song offset", #selector(menuResetOffset),
+                              enabled: engine.nowPlaying != nil,
+                              symbol: "arrow.uturn.backward"))
+            menu.addItem(item("Reset global offset", #selector(menuResetGlobalOffset),
+                              enabled: Settings.shared.globalOffsetMs != 0,
+                              symbol: "arrow.counterclockwise"))
+            menu.addItem(.separator())
+
+            menu.addItem(section("Display"))
             let widthSlider = SliderItemView(title: "Menu bar width",
                                              range: Settings.widthRange,
                                              value: Settings.shared.width,
@@ -310,8 +489,14 @@ final class StatusController: NSObject, LyricsEngineDelegate, NSPopoverDelegate 
             }
             menu.addItem(viewItem(widthSlider))
 
-            // Provider submenu
+            let scrollItem = item("Scroll long menu bar lines",
+                                  #selector(menuToggleLongLineScroll),
+                                  symbol: "text.alignleft")
+            scrollItem.state = Settings.shared.scrollLongLines ? .on : .off
+            menu.addItem(scrollItem)
+
             let providerItem = NSMenuItem(title: fixedMenuTitle("Lyrics provider"), action: nil, keyEquivalent: "")
+            providerItem.image = menuImage("music.mic")
             let sub = NSMenu()
             sub.minimumWidth = MenuLayout.width
             for kind in LyricsProviderKind.allCases {
@@ -325,34 +510,60 @@ final class StatusController: NSObject, LyricsEngineDelegate, NSPopoverDelegate 
             menu.addItem(providerItem)
 
             menu.addItem(.separator())
+            menu.addItem(section("Library"))
             let count = LyricsStore.shared.trackCount()
             menu.addItem(item("Build lyrics library from Spotify…", #selector(menuBuildLibrary),
-                              enabled: !LibraryBuilder.shared.isRunning))
-            menu.addItem(item("Library: \(count) song\(count == 1 ? "" : "s") cached", nil, enabled: false))
+                              enabled: !LibraryBuilder.shared.isRunning,
+                              symbol: "square.and.arrow.down"))
+            menu.addItem(informationalItem("Library: \(count) song\(count == 1 ? "" : "s") cached",
+                                           symbol: "externaldrive"))
 
             menu.addItem(.separator())
-            menu.addItem(item("Logged in to Spotify ✓", nil, enabled: false))
-            menu.addItem(item("Log out", #selector(menuLogout)))
+            menu.addItem(section("Account"))
+            menu.addItem(informationalItem("Logged in to Spotify", symbol: "checkmark.circle"))
+            menu.addItem(item("Log out", #selector(menuLogout), symbol: "rectangle.portrait.and.arrow.right"))
         } else {
+            menu.addItem(section("Setup"))
             menu.addItem(item(hasClient ? "Set Spotify Client ID…" : "① Set Spotify Client ID…",
-                              #selector(menuSetClientId)))
-            let login = item("② Log in to Spotify…", #selector(menuLogin))
+                              #selector(menuSetClientId),
+                              symbol: "key"))
+            let login = item("② Log in to Spotify…", #selector(menuLogin), symbol: "person.crop.circle")
             login.isEnabled = hasClient
             menu.addItem(login)
             menu.addItem(.separator())
-            menu.addItem(item("How to get a Client ID…", #selector(menuHelp)))
+            menu.addItem(item("How to get a Client ID…", #selector(menuHelp), symbol: "questionmark.circle"))
         }
 
         menu.addItem(.separator())
-        menu.addItem(item("Quit lyrbar", #selector(menuQuit)))
+        menu.addItem(item("Quit lyrbar", #selector(menuQuit), symbol: "power"))
         return menu
     }
 
-    private func item(_ title: String, _ action: Selector?, enabled: Bool = true) -> NSMenuItem {
+    private func section(_ title: String) -> NSMenuItem {
+        let mi = NSMenuItem()
+        mi.view = MenuSectionHeaderView(title)
+        return mi
+    }
+
+    private func item(_ title: String, _ action: Selector?, enabled: Bool = true, symbol: String? = nil) -> NSMenuItem {
         let mi = NSMenuItem(title: fixedMenuTitle(title), action: action, keyEquivalent: "")
         mi.target = self
         mi.isEnabled = enabled && action != nil
+        if let symbol { mi.image = menuImage(symbol) }
         return mi
+    }
+
+    private func informationalItem(_ title: String, symbol: String? = nil) -> NSMenuItem {
+        let mi = NSMenuItem(title: fixedMenuTitle(title), action: nil, keyEquivalent: "")
+        mi.isEnabled = false
+        if let symbol { mi.image = menuImage(symbol) }
+        return mi
+    }
+
+    private func menuImage(_ symbol: String) -> NSImage? {
+        let cfg = NSImage.SymbolConfiguration(pointSize: 12, weight: .regular)
+        return NSImage(systemSymbolName: symbol, accessibilityDescription: nil)?
+            .withSymbolConfiguration(cfg)
     }
 
     private func fixedMenuTitle(_ title: String) -> String {
@@ -393,7 +604,12 @@ final class StatusController: NSObject, LyricsEngineDelegate, NSPopoverDelegate 
     @objc private func menuTrash() { engine.trashCurrent() }
     @objc private func menuReload() { engine.reload() }
     @objc private func menuResetOffset() { engine.setOffset(0) }
+    @objc private func menuResetGlobalOffset() { engine.setGlobalOffset(0) }
     @objc private func menuResume() { engine.resume() }
+    @objc private func menuToggleLongLineScroll() {
+        Settings.shared.scrollLongLines.toggle()
+        scheduleWidthRender()
+    }
 
     @objc private func menuBuildLibrary() {
         guard !LibraryBuilder.shared.isRunning else { return }

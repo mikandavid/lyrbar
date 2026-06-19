@@ -17,4 +17,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             controller.beginLogin()
         }
     }
+
+    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
+        false
+    }
 }

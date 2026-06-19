@@ -32,11 +32,14 @@ final class LyricsEngine {
     /// Lyric timing offset for the *current* track (ms), loaded from / saved to
     /// the store per song. Positive = show lyrics earlier.
     private(set) var currentOffsetMs = 0
+    var effectiveOffsetMs: Int { Settings.shared.globalOffsetMs + currentOffsetMs }
     /// The next track in the Spotify queue, for the popover's "Up next" preview.
     private(set) var upNext: UpNext?
 
     private var pollTimer: Timer?
     private var tickTimer: Timer?
+    private var lyricsFetchTask: Task<Void, Never>?
+    private var prefetchTask: Task<Void, Never>?
     private var fetchGeneration = 0
     private var lastStatusText = ""
     private var running = false
@@ -45,6 +48,7 @@ final class LyricsEngine {
     // Auto-suspend after this long with playback stopped/paused.
     private let idleLimit: TimeInterval = 600   // 10 minutes
     private let idlePollInterval: TimeInterval = 120
+    private let activeTickInterval: TimeInterval = 0.2
     private var notPlayingSince: TimeInterval?
 
     var current: LyricsResult? {
@@ -67,6 +71,11 @@ final class LyricsEngine {
         running = false
         isSuspended = false
         notPlayingSince = nil
+        lyricsFetchTask?.cancel()
+        lyricsFetchTask = nil
+        prefetchTask?.cancel()
+        prefetchTask = nil
+        inFlightPrefetch.removeAll()
         invalidateTimers()
         nowPlaying = nil
         candidates = []
@@ -103,7 +112,7 @@ final class LyricsEngine {
                                          repeats: true) { [weak self] _ in
             Task { await self?.poll() }
         }
-        tickTimer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] _ in
+        tickTimer = Timer.scheduledTimer(withTimeInterval: activeTickInterval, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated { self?.tick() }
         }
     }
@@ -171,6 +180,7 @@ final class LyricsEngine {
     // MARK: Lyrics fetch (store-backed)
 
     private func fetchLyrics(for np: NowPlaying, force: Bool = false) {
+        lyricsFetchTask?.cancel()
         fetchGeneration += 1
         let gen = fetchGeneration
         let kind = Settings.shared.provider
@@ -196,9 +206,9 @@ final class LyricsEngine {
         currentLineIndex = nil
         delegate?.engineDidLoadLyrics()
 
-        Task {
+        lyricsFetchTask = Task {
             var results = await LyricsService.resolve(query, kind: kind)
-            guard gen == fetchGeneration, nowPlaying?.trackId == np.trackId else { return }
+            guard !Task.isCancelled, gen == fetchGeneration, nowPlaying?.trackId == np.trackId else { return }
             let rejected = store.rejected(np.trackId)
             results = results.filter { !rejected.contains($0.fingerprint) }
             candidates = results
@@ -213,12 +223,19 @@ final class LyricsEngine {
     }
 
     private func prefetchUpcoming(kind: LyricsProviderKind) {
-        Task {
+        prefetchTask?.cancel()
+        inFlightPrefetch.removeAll()
+        prefetchTask = Task {
             let upcoming = (try? await client.upcoming(limit: 3)) ?? []
+            guard !Task.isCancelled, running else { return }
             updateUpNext(from: upcoming.first)
             for track in upcoming where !store.hasLyrics(track.id) && !inFlightPrefetch.contains(track.id) {
                 inFlightPrefetch.insert(track.id)
                 let res = await LyricsService.resolve(track.query, kind: kind)
+                guard !Task.isCancelled, running else {
+                    inFlightPrefetch.remove(track.id)
+                    return
+                }
                 let rejected = store.rejected(track.id)
                 let filtered = res.filter { !rejected.contains($0.fingerprint) }
                 inFlightPrefetch.remove(track.id)
@@ -246,11 +263,31 @@ final class LyricsEngine {
             let elapsed = (ProcessInfo.processInfo.systemUptime - np.capturedAt) * 1000.0
             pos += Int(elapsed)
         }
-        return pos + currentOffsetMs
+        return pos + effectiveOffsetMs
     }
 
     /// True playback position (no lyric offset) — for the transport/progress UI.
-    func playbackPosition() -> Int { position() - currentOffsetMs }
+    func playbackPosition() -> Int { position() - effectiveOffsetMs }
+
+    /// Current lyric line's display window in the same timeline as `position()`.
+    /// The UI uses this to pace overflow scrolling without owning lyric timing.
+    func currentLineDisplayWindow() -> (startMs: Int, endMs: Int)? {
+        guard
+            let np = nowPlaying,
+            let idx = currentLineIndex,
+            lines.indices.contains(idx)
+        else { return nil }
+
+        let startMs = lines[idx].timeMs
+        let endMs: Int
+        if lines.indices.contains(idx + 1) {
+            endMs = lines[idx + 1].timeMs
+        } else {
+            endMs = np.durationMs + effectiveOffsetMs
+        }
+        guard endMs > startMs else { return nil }
+        return (startMs, endMs)
+    }
 
     /// Force an immediate poll (e.g. right after a transport command) so the UI
     /// reflects the new playback state without waiting for the next tick.
@@ -335,7 +372,14 @@ final class LyricsEngine {
         tick()
     }
 
+    func setGlobalOffset(_ ms: Int) {
+        Settings.shared.globalOffsetMs = ms
+        tick()
+    }
+
     func reload() {
+        lyricsFetchTask?.cancel()
+        prefetchTask?.cancel()
         inFlightPrefetch.removeAll()
         if let np = nowPlaying { fetchLyrics(for: np, force: true) }
     }

@@ -16,15 +16,19 @@ final class Settings {
     private func registerDefaults() {
         defaults.register(defaults: [
             Keys.width: 260.0,
+            Keys.scrollLongLines: true,
+            Keys.globalOffsetMs: 0,
             Keys.provider: LyricsProviderKind.auto.rawValue,
             Keys.port: 8888,
-            Keys.pollMs: 2000,
+            Keys.pollMs: 5000,
         ])
     }
 
     enum Keys {
         static let clientId = "clientId"
         static let width = "width"
+        static let scrollLongLines = "scrollLongLines"
+        static let globalOffsetMs = "globalOffsetMs"
         static let provider = "provider"
         static let port = "port"
         static let pollMs = "pollMs"
@@ -42,9 +46,23 @@ final class Settings {
     }
     static let widthRange: ClosedRange<Double> = 120...700
 
+    /// When enabled, synced lyric lines that exceed the menu bar width pan
+    /// across during their active display window. When disabled, they truncate.
+    var scrollLongLines: Bool {
+        get { defaults.bool(forKey: Keys.scrollLongLines) }
+        set { defaults.set(newValue, forKey: Keys.scrollLongLines) }
+    }
+
     /// Range for the per-song lyric offset slider (ms). The value itself lives
     /// in the lyrics store, keyed per track — see `LyricsEngine.currentOffsetMs`.
     static let offsetRange: ClosedRange<Double> = -5000...5000
+
+    /// User-wide lyric timing offset in ms. This composes with each song's
+    /// saved offset, so users can set a personal baseline and still tune tracks.
+    var globalOffsetMs: Int {
+        get { min(max(defaults.integer(forKey: Keys.globalOffsetMs), -5000), 5000) }
+        set { defaults.set(min(max(newValue, -5000), 5000), forKey: Keys.globalOffsetMs) }
+    }
 
     var provider: LyricsProviderKind {
         get { LyricsProviderKind(rawValue: defaults.string(forKey: Keys.provider) ?? "") ?? .auto }
@@ -57,7 +75,7 @@ final class Settings {
     }
 
     var pollMs: Int {
-        get { max(1000, defaults.integer(forKey: Keys.pollMs)) }
+        get { max(2000, defaults.integer(forKey: Keys.pollMs)) }
         set { defaults.set(newValue, forKey: Keys.pollMs) }
     }
 

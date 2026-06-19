@@ -45,7 +45,12 @@ private final class FlippedStackView: NSStackView {
 
 /// A slim playback progress bar that can also be clicked/dragged to seek.
 private final class ProgressBarView: NSView {
-    var fraction: CGFloat = 0 { didSet { needsLayout = true } }
+    private var lastLaidOutFraction: CGFloat = -1
+    var fraction: CGFloat = 0 {
+        didSet {
+            if abs(fraction - lastLaidOutFraction) >= 0.001 { needsLayout = true }
+        }
+    }
     var onScrub: ((CGFloat) -> Void)?
     private let track = CALayer()
     private let fill = CALayer()
@@ -72,6 +77,7 @@ private final class ProgressBarView: NSView {
         let w = bounds.width * max(0, min(1, fraction))
         fill.frame = CGRect(x: 0, y: y, width: w, height: h)
         fill.cornerRadius = h / 2
+        lastLaidOutFraction = fraction
         CATransaction.commit()
     }
 
@@ -144,6 +150,8 @@ final class LyricsPopoverController: NSViewController {
 
     private var artURLLoaded: String?
     private var refreshTimer: Timer?
+    private var artworkTask: URLSessionDataTask?
+    private var highlightedRowIndex: Int?
     private static let placeholder: NSImage? = {
         let cfg = NSImage.SymbolConfiguration(pointSize: 22, weight: .light)
         return NSImage(systemSymbolName: "music.note", accessibilityDescription: nil)?.withSymbolConfiguration(cfg)
@@ -154,6 +162,11 @@ final class LyricsPopoverController: NSViewController {
         super.init(nibName: nil, bundle: nil)
     }
     required init?(coder: NSCoder) { fatalError() }
+
+    deinit {
+        refreshTimer?.invalidate()
+        artworkTask?.cancel()
+    }
 
     // MARK: Layout
 
@@ -235,6 +248,8 @@ final class LyricsPopoverController: NSViewController {
         stack.translatesAutoresizingMaskIntoConstraints = false
         scrollView.translatesAutoresizingMaskIntoConstraints = false
         scrollView.hasVerticalScroller = true
+        scrollView.hasHorizontalScroller = false
+        scrollView.autohidesScrollers = true
         scrollView.drawsBackground = false
         scrollView.documentView = stack
         root.addSubview(scrollView)
@@ -317,6 +332,10 @@ final class LyricsPopoverController: NSViewController {
         b.target = self
         b.action = action
         b.translatesAutoresizingMaskIntoConstraints = false
+        NSLayoutConstraint.activate([
+            b.widthAnchor.constraint(equalToConstant: 30),
+            b.heightAnchor.constraint(equalToConstant: 28),
+        ])
     }
 
     private func buildControls() -> NSView {
@@ -408,6 +427,10 @@ final class LyricsPopoverController: NSViewController {
         b.toolTip = tip
         b.translatesAutoresizingMaskIntoConstraints = false
         b.setContentHuggingPriority(.required, for: .horizontal)
+        NSLayoutConstraint.activate([
+            b.widthAnchor.constraint(equalToConstant: 24),
+            b.heightAnchor.constraint(equalToConstant: 24),
+        ])
     }
 
     /// Update the "Up next" footer preview (nil hides the row).
@@ -435,7 +458,7 @@ final class LyricsPopoverController: NSViewController {
     private func startRefresh() {
         stopRefresh()
         updateTransport()
-        refreshTimer = Timer.scheduledTimer(withTimeInterval: 0.25, repeats: true) { [weak self] _ in
+        refreshTimer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated { self?.updateTransport() }
         }
     }
@@ -498,6 +521,7 @@ final class LyricsPopoverController: NSViewController {
         guard isViewLoaded, let engine else { return }
         rows.forEach { $0.removeFromSuperview() }
         rows.removeAll()
+        highlightedRowIndex = nil
         stack.arrangedSubviews.forEach { stack.removeArrangedSubview($0); $0.removeFromSuperview() }
 
         providerPopup.selectItem(at: LyricsProviderKind.allCases.firstIndex(of: Settings.shared.provider) ?? 0)
@@ -579,7 +603,15 @@ final class LyricsPopoverController: NSViewController {
 
     func highlight(_ index: Int?) {
         guard isViewLoaded else { return }
-        for (i, row) in rows.enumerated() { row.setActive(i == index) }
+        if highlightedRowIndex != index {
+            if let old = highlightedRowIndex, rows.indices.contains(old) {
+                rows[old].setActive(false)
+            }
+            if let index, rows.indices.contains(index) {
+                rows[index].setActive(true)
+            }
+            highlightedRowIndex = index
+        }
         guard let index, rows.indices.contains(index) else { return }
         // Force a layout pass first: when the popover has just opened, the stack
         // and clip view haven't been laid out yet, so their frames are still
@@ -596,21 +628,26 @@ final class LyricsPopoverController: NSViewController {
 
     private func loadArtwork(_ urlStr: String?) {
         guard let urlStr else {
+            artworkTask?.cancel()
+            artworkTask = nil
             artwork.image = Self.placeholder
             artURLLoaded = nil
             return
         }
         guard urlStr != artURLLoaded else { return }
+        artworkTask?.cancel()
         artURLLoaded = urlStr
         artwork.image = Self.placeholder
         guard let url = URL(string: urlStr) else { return }
-        URLSession.shared.dataTask(with: url) { [weak self] data, _, _ in
+        artworkTask = URLSession.shared.dataTask(with: url) { [weak self] data, _, _ in
             guard let data, let img = NSImage(data: data) else { return }
             DispatchQueue.main.async {
                 guard let self, self.artURLLoaded == urlStr else { return }
+                self.artworkTask = nil
                 self.artwork.image = img
             }
-        }.resume()
+        }
+        artworkTask?.resume()
     }
 
     // MARK: Actions
